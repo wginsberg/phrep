@@ -19,7 +19,7 @@ def verify_database_init():
     conn.execute(create_label)
     conn.commit()
 
-def image_generator(path, batch_size=64):
+def image_generator(path, batch_size=32):
 
     # lazy load imports
     from skimage.io import imread
@@ -32,7 +32,9 @@ def image_generator(path, batch_size=64):
 
     i = 0
     while i < len(files):
-        file_names = files[i: i+batch_size]
+        file_names = filter(lambda x: x.endswith('.jpg'),
+                            files[i: i+batch_size])
+        print('Preprocessing {} images ...'.format(len(file_names)))
         images = np.array(map(preprocess,
                               map(imread,
                                   map(lambda x: os.path.join(path, x),
@@ -51,6 +53,7 @@ def prediction_generator(path):
     mobilenet_model = mobilenet.MobileNet(weights='imagenet')
 
     for images, files in image_generator(path):
+        print('Running model ...')
         predictions = mobilenet_model.predict(images)
         decoded = decode_predictions(predictions)
         yield decoded, files
@@ -76,7 +79,7 @@ def build_index(path):
     print('Running mobilenet ...')
     for pred_batch, fname_batch in prediction_generator(path):
         
-        print('Saving index ...')
+        print('Saving ...')
         for prediction, fname in zip(pred_batch, fname_batch):
             records = [(tag, fname, confidence, directory_id) for _, tag, confidence in prediction]
             conn.executemany(sql, records)
