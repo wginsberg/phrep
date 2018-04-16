@@ -5,9 +5,13 @@ import os
 from multiprocessing.dummy import Pool as ThreadPool
 from skimage.io import imread
 from skimage.transform import resize
+
 import numpy as np
 sqlite3.register_adapter(np.float32, float)
 
+import logging
+logging.basicConfig()
+logger = logging.getLogger('phrep')
 
 def verify_db_init():
 
@@ -48,13 +52,15 @@ def file_generator(path, batch_size=64):
         
         file_names = filter(lambda x: x.endswith('.jpg'),
                             files[i: i+batch_size])
-       
+
+        logger.info('Checking index for {} potential new files'.format(len(file_names)))
         existing = []
         for f in file_names:
             cursor.execute(sql, (f, path))
             existing.append(cursor.fetchone()[0])
         new_files =  set(file_names) - set(existing)
         if new_files:
+            logger.info('Found {} new files'.format(len(new_files)))
             yield new_files
         i += batch_size
 
@@ -72,10 +78,9 @@ def image_generator(path, batch_size=8):
 
     for file_batch in file_generator(path):
  
-        print('Preprocessing {} images ...'.format(len(file_batch)))
+        logger.info('Preprocessing {} images ...'.format(len(file_batch)))
         images = pool.map(_preprocess, file_batch)
 
-        print('Building numpy array ...')
         images = np.array([im for im in images if im is not None]) 
         
         yield images, file_batch
@@ -91,7 +96,7 @@ def prediction_generator(path):
     mobilenet_model = mobilenet.MobileNet(weights='imagenet')
 
     for images, files in image_generator(path):
-        print('Running model ...')
+        logger.info('Running model ...')
         predictions = mobilenet_model.predict(images)
         decoded = decode_predictions(predictions)
         yield decoded, files
@@ -117,10 +122,9 @@ def new_results(query, path):
 
     sql = 'INSERT OR IGNORE INTO label (tag, file, directory_id) VALUES (?, ?, ?)'
 
-    print('Running mobilenet ...')
     for pred_batch, fname_batch in prediction_generator(path):
         
-        print('Saving ...')
+        logger.info('Saving ...')
         for prediction, fname in zip(pred_batch, fname_batch):
             
             tags = map(lambda (_1, tag, _2): tag, prediction)
@@ -169,8 +173,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='search images by their visual content')
     parser.add_argument('query')
     parser.add_argument('path')
+    parser.add_argument('--verbose', action='store_true')
 
     args = parser.parse_args()
+    
+    if args.verbose:
+        logger.setLevel(logging.INFO)
 
     main(args.query, args.path)
 
