@@ -2,6 +2,9 @@
 import argparse
 import sqlite3
 import os
+from multiprocessing.dummy import Pool as ThreadPool
+from skimage.io import imread
+from skimage.transform import resize
 import numpy as np
 sqlite3.register_adapter(np.float32, float)
 
@@ -19,26 +22,33 @@ def verify_database_init():
     conn.execute(create_label)
     conn.commit()
 
-def image_generator(path, batch_size=32):
-
-    # lazy load imports
-    from skimage.io import imread
-    from skimage.transform import resize
+def image_generator(path, batch_size=8):
 
     # Take files at the top level of the given directory
     files = next(os.walk(path))[2]
 
-    preprocess = lambda im: resize(im, (224, 224))
+    pool = ThreadPool(8)
+
+    def _preprocess(fname):
+        print(fname)
+        if not fname.endswith('.jpg'):
+            return None        
+        im = imread(os.path.join(path, fname)) 
+        im = resize(im, (224, 224))
+        return im
 
     i = 0
     while i < len(files):
+        
         file_names = filter(lambda x: x.endswith('.jpg'),
                             files[i: i+batch_size])
+        
         print('Preprocessing {} images ...'.format(len(file_names)))
-        images = np.array(map(preprocess,
-                              map(imread,
-                                  map(lambda x: os.path.join(path, x),
-                                      file_names))))
+        images = pool.map(_preprocess, file_names)
+
+        print('Building numpy array ...')
+        images = np.array([im for im in images if im is not None]) 
+        
         yield images, file_names
         i += batch_size
 
