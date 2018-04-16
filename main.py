@@ -3,35 +3,44 @@ import argparse
 import sqlite3
 import os
 
-def predict(filename):
-
+def predict(dir_path):
+    '''
+    Predict on all images in the given directory
+    '''
+    
+    # imports here instead of top level to save time
     import numpy as np
     sqlite3.register_adapter(np.float32, float)
     
-    from keras.applications import mobilenet
-    from keras.preprocessing.image import load_img
-    from keras.preprocessing.image import img_to_array
+    from keras.preprocessing.image import ImageDataGenerator 
     from keras.applications.imagenet_utils import decode_predictions
+    from keras.applications import mobilenet
     mobilenet_model = mobilenet.MobileNet(weights='imagenet')
 
-    # Load
-    original = load_img(filename, target_size=(224, 224))
-    numpy_image = img_to_array(original)
-    image_batch = np.expand_dims(numpy_image, axis=0)
-    
-    # Preprocess
-    processed_image = mobilenet.preprocess_input(image_batch.copy())
-     
-    # Run model
-    predictions = mobilenet_model.predict(processed_image)
-    labels = decode_predictions(predictions)
+    # Workaround to use the default flows provided with keras
+    parent_dir, classname = os.path.split(os.path.normpath(dir_path))
 
-    return labels
+    generator = ImageDataGenerator()
+    flow = generator.flow_from_directory(parent_dir,
+                                         classes=[classname],
+                                         target_size=(224, 224))
+    predictions = mobilenet_model.predict_generator(flow)
+    decoded = decode_predictions(predictions)
+
+    return decoded
 
 def verify_database_init():
-    sql = 'CREATE TABLE IF NOT EXISTS label (tag TEXT, file TEXT, confidence REAL)'
+    create_label = 'CREATE TABLE IF NOT EXISTS label (          \
+                        directory_id REFERENCES directory(id),  \
+                        tag TEXT,                               \
+                        file TEXT,                              \
+                        confidence REAL)'
+    create_directory = 'CREATE TABLE IF NOT EXISTS directory (  \
+                            id PRIMARY KEY,                     \
+                            path TEXT)'                         
     conn = sqlite3.connect('example.db')
-    conn.execute(sql)
+    conn.execute(create_directory)
+    conn.execute(create_label)
     conn.commit()
 
 def build_index(path):
@@ -40,17 +49,30 @@ def build_index(path):
     verify_database_init()
 
     conn = sqlite3.connect('example.db')
-    sql = "INSERT INTO label (tag, file, confidence) VALUES (?, ?, ?)"
+    c = conn.cursor()
+    
+    # Add directory entry
+    sql = 'INSERT INTO directory (path) VALUES (?)'
+    values = (os.path.normpath(path),)
+    c.execute(sql, values)
+    directory_id = c.lastrowid
 
-    for item in os.listdir(path):
-        file_name = os.path.join(path, item)
-        if not os.path.isfile(file_name):
-            continue
-        result = predict(file_name)
-        records = [(tag, file_name, confidence) for _, tag, confidence in result[0]]
+    # Run predictions and insert records
+
+    sql = 'INSERT INTO label (tag, file, confidence, directory_id) VALUES (?, ?, ?, ?)'
+
+    print('Running mobilenet ...')
+    predictions = predict(path)
+
+    print('Saving index ...')
+    files = sorted([sorted(files) for root, _, files in os.walk(path)][0])
+    for prediction, fname in zip(predictions, files):
+        records = [(tag, fname, confidence, directory_id) for _, tag, confidence in prediction]
         conn.executemany(sql, records)
-        print(item)
+    
     conn.commit()
+
+    print('Done')
 
 def verify_index(path):
     
@@ -59,8 +81,8 @@ def verify_index(path):
     conn = sqlite3.connect('example.db')
     c = conn.cursor()
 
-    sql = 'SELECT * FROM label WHERE file LIKE ?'
-    pattern = os.path.join(path, '%')
+    sql = 'SELECT * FROM directory WHERE path = ?'
+    pattern = os.path.normpath(path)
     c.execute(sql, (pattern,))
     if c.fetchone():
         return True
