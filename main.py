@@ -8,19 +8,24 @@ from skimage.transform import resize
 import numpy as np
 sqlite3.register_adapter(np.float32, float)
 
-def verify_database_init():
-    create_label = 'CREATE TABLE IF NOT EXISTS label (          \
-                        directory_id REFERENCES directory(id),  \
-                        tag TEXT,                               \
-                        file TEXT,                              \
-                        confidence REAL)'
-    create_directory = 'CREATE TABLE IF NOT EXISTS directory (  \
-                            id PRIMARY KEY,                     \
-                            path TEXT)'                         
+
+def verify_db_init():
+
+    create_label = '''CREATE TABLE IF NOT EXISTS label (
+                        directory_id REFERENCES directory(id),
+                        tag TEXT,
+                        file TEXT,
+                        PRIMARY KEY (directory_id, tag, file))'''
+
+    create_directory = '''CREATE TABLE IF NOT EXISTS directory (
+                            directory_id INTEGER PRIMARY KEY,
+                            path TEXT)'''
+
     conn = sqlite3.connect('example.db')
     conn.execute(create_directory)
     conn.execute(create_label)
     conn.commit()
+
 
 def image_generator(path, batch_size=8):
 
@@ -30,7 +35,6 @@ def image_generator(path, batch_size=8):
     pool = ThreadPool(8)
 
     def _preprocess(fname):
-        print(fname)
         if not fname.endswith('.jpg'):
             return None        
         im = imread(os.path.join(path, fname)) 
@@ -68,69 +72,73 @@ def prediction_generator(path):
         decoded = decode_predictions(predictions)
         yield decoded, files
 
-def build_index(path):
-    print('Building index. This may take some time...')
-    
-    verify_database_init()
+
+def new_results(query, path):
+
+    path = os.path.normpath(path)
 
     conn = sqlite3.connect('example.db')
     c = conn.cursor()
     
-    # Add directory entry
-    sql = 'INSERT INTO directory (path) VALUES (?)'
-    values = (os.path.normpath(path),)
+    # Add record for directory
+    sql = 'INSERT OR IGNORE INTO directory (path) VALUES (?)'
+    values = (path,)
     c.execute(sql, values)
-    directory_id = c.lastrowid
-
+    sql = 'SELECT directory_id FROM directory WHERE path = ?'
+    values = (path,)
+    c.execute(sql, values)
+    directory_id = c.fetchone()[0]
+    
     # Run predictions and insert records
 
-    sql = 'INSERT INTO label (tag, file, confidence, directory_id) VALUES (?, ?, ?, ?)'
+    sql = 'INSERT OR IGNORE INTO label (tag, file, directory_id) VALUES (?, ?, ?)'
 
     print('Running mobilenet ...')
     for pred_batch, fname_batch in prediction_generator(path):
         
         print('Saving ...')
         for prediction, fname in zip(pred_batch, fname_batch):
-            records = [(tag, fname, confidence, directory_id) for _, tag, confidence in prediction]
+            
+            tags = map(lambda (_1, tag, _2): tag, prediction)
+            records = map(lambda tag: (tag, fname, directory_id), tags)
             conn.executemany(sql, records)
-    
-    conn.commit()
+            conn.commit()
+            
+            if query in tags:
+                yield fname
 
-    print('Done')
 
-def verify_index(path):
-    
-    verify_database_init()
-    
-    conn = sqlite3.connect('example.db')
-    c = conn.cursor()
-
-    sql = 'SELECT * FROM directory WHERE path = ?'
-    pattern = os.path.normpath(path)
-    c.execute(sql, (pattern,))
-    if c.fetchone():
-        return True
-    else:
-        build_index(path)
-        #if input('No index found. Build one now? [y/N] ') in ('y', 'Y'):
-        #    build_index(path)
-    return True
-
-def prepare_query(query):
-    return query.lower().replace(' ', '_')
-
-def search(query, path):
-
-    query = prepare_query(query)
+def existing_results(query, path):
+    '''
+    Query database for existing search results
+    '''
 
     conn = sqlite3.connect('example.db')
     c = conn.cursor()
 
-    sql = "SELECT file, confidence FROM label WHERE tag = ? ORDER BY confidence DESC"
-    c.execute(sql, (query,))
+    sql = '''SELECT file
+             FROM label NATURAL JOIN directory
+             WHERE tag = ? AND path = ?'''
 
-    for file_name, confidence in c.fetchall():
-        print(os.path.relpath(file_name, path))
+    for file_name, in c.execute(sql, (query, path)):
+        yield file_name
+
+
+def all_results(query, path):
+
+    for result in existing_results(query, path):
+        yield result
+
+    for result in new_results(query, path):
+        yield result
+
+
+def main(query, path):
+    verify_db_init()
+    query = query.lower().replace(' ', '_')
+    for result in all_results(query, path):
+        print(result)
+
 
 if __name__ == '__main__':
 
@@ -140,6 +148,5 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    if verify_index(args.path):
-        search(args.query, args.path)
+    main(args.query, args.path)
 
