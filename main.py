@@ -2,32 +2,8 @@
 import argparse
 import sqlite3
 import os
-
-def predict(dir_path):
-    '''
-    Predict on all images in the given directory
-    '''
-    
-    # imports here instead of top level to save time
-    import numpy as np
-    sqlite3.register_adapter(np.float32, float)
-    
-    from keras.preprocessing.image import ImageDataGenerator 
-    from keras.applications.imagenet_utils import decode_predictions
-    from keras.applications import mobilenet
-    mobilenet_model = mobilenet.MobileNet(weights='imagenet')
-
-    # Workaround to use the default flows provided with keras
-    parent_dir, classname = os.path.split(os.path.normpath(dir_path))
-
-    generator = ImageDataGenerator()
-    flow = generator.flow_from_directory(parent_dir,
-                                         classes=[classname],
-                                         target_size=(224, 224))
-    predictions = mobilenet_model.predict_generator(flow)
-    decoded = decode_predictions(predictions)
-
-    return decoded
+import numpy as np
+sqlite3.register_adapter(np.float32, float)
 
 def verify_database_init():
     create_label = 'CREATE TABLE IF NOT EXISTS label (          \
@@ -42,6 +18,42 @@ def verify_database_init():
     conn.execute(create_directory)
     conn.execute(create_label)
     conn.commit()
+
+def image_generator(path, batch_size=64):
+
+    # lazy load imports
+    from skimage.io import imread
+    from skimage.transform import resize
+
+    # Take files at the top level of the given directory
+    files = next(os.walk(path))[2]
+
+    preprocess = lambda im: resize(im, (224, 224))
+
+    i = 0
+    while i < len(files):
+        file_names = files[i: i+batch_size]
+        images = np.array(map(preprocess,
+                              map(imread,
+                                  map(lambda x: os.path.join(path, x),
+                                      file_names))))
+        yield images, file_names
+        i += batch_size
+
+def prediction_generator(path):
+    '''
+    Predict on all images in the given directory
+    '''
+    
+    # lazy load model import
+    from keras.applications.imagenet_utils import decode_predictions
+    from keras.applications import mobilenet
+    mobilenet_model = mobilenet.MobileNet(weights='imagenet')
+
+    for images, files in image_generator(path):
+        predictions = mobilenet_model.predict(images)
+        decoded = decode_predictions(predictions)
+        yield decoded, files
 
 def build_index(path):
     print('Building index. This may take some time...')
@@ -62,13 +74,12 @@ def build_index(path):
     sql = 'INSERT INTO label (tag, file, confidence, directory_id) VALUES (?, ?, ?, ?)'
 
     print('Running mobilenet ...')
-    predictions = predict(path)
-
-    print('Saving index ...')
-    files = sorted([sorted(files) for root, _, files in os.walk(path)][0])
-    for prediction, fname in zip(predictions, files):
-        records = [(tag, fname, confidence, directory_id) for _, tag, confidence in prediction]
-        conn.executemany(sql, records)
+    for pred_batch, fname_batch in prediction_generator(path):
+        
+        print('Saving index ...')
+        for prediction, fname in zip(pred_batch, fname_batch):
+            records = [(tag, fname, confidence, directory_id) for _, tag, confidence in prediction]
+            conn.executemany(sql, records)
     
     conn.commit()
 
