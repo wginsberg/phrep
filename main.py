@@ -81,7 +81,7 @@ def image_generator(path, batch_size=8):
             return None
 
         im = imread(os.path.join(path, fname)) 
-        im = resize(im, (224, 224))
+        im = resize(im, (224, 224), mode='constant')
         return im
 
     for file_batch in file_generator(path):
