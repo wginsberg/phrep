@@ -127,6 +127,7 @@ def prediction_generator(path):
             logger.info('Loading model')
             model = _get_model()
 
+        logger.info('Predicting on {} images'.format(len(images)))
         predictions = model.predict(images)
         decoded = _decode(predictions)
         yield decoded, files
