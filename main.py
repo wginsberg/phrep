@@ -1,17 +1,17 @@
 #!/usr/bin/env python
+import logging
+logging.basicConfig()
+logger = logging.getLogger('phrep')
+
 import argparse
 import sqlite3
+import sys
 import os
 from multiprocessing.dummy import Pool as ThreadPool
-from skimage.io import imread
-from skimage.transform import resize
 
 import numpy as np
 sqlite3.register_adapter(np.float32, float)
 
-import logging
-logging.basicConfig()
-logger = logging.getLogger('phrep')
 
 def verify_db_init():
 
@@ -57,7 +57,9 @@ def file_generator(path, batch_size=64):
         existing = []
         for f in file_names:
             cursor.execute(sql, (f, path))
-            existing.append(cursor.fetchone()[0])
+            result = cursor.fetchone()
+            if result:
+                existing.append(result[0])
         new_files =  set(file_names) - set(existing)
         if new_files:
             logger.info('Found {} new files'.format(len(new_files)))
@@ -70,8 +72,14 @@ def image_generator(path, batch_size=8):
     pool = ThreadPool(8)
 
     def _preprocess(fname):
+        
+        # Lazy load imports
+        from skimage.io import imread
+        from skimage.transform import resize
+        
         if not fname.endswith('.jpg'):
-            return None        
+            return None
+
         im = imread(os.path.join(path, fname)) 
         im = resize(im, (224, 224))
         return im
@@ -89,16 +97,38 @@ def prediction_generator(path):
     '''
     Predict on all images in the given directory
     '''
-    
-    # lazy load model import
-    from keras.applications.imagenet_utils import decode_predictions
-    from keras.applications import mobilenet
-    mobilenet_model = mobilenet.MobileNet(weights='imagenet')
 
+    def _get_model():
+        '''
+        Lazy loading the model to save time
+        In addition, hack to surpress write to stderr during keras initialization
+        '''
+
+        _stderr = sys.stderr
+        sys.stderr = open(os.devnull, 'wb')
+        from keras.applications import mobilenet
+        sys.stderr.close()
+        sys.stderr = _stderr
+        
+        return mobilenet.MobileNet(weights='imagenet')
+ 
+    def _decode(predictions):
+        '''
+        Lazy loading
+        '''
+        from keras.applications.imagenet_utils import decode_predictions
+        return decode_predictions(predictions)
+
+    model = None
+    
     for images, files in image_generator(path):
-        logger.info('Running model ...')
-        predictions = mobilenet_model.predict(images)
-        decoded = decode_predictions(predictions)
+        
+        if model is None:
+            logger.info('Loading model')
+            model = _get_model()
+
+        predictions = model.predict(images)
+        decoded = _decode(predictions)
         yield decoded, files
 
 
@@ -156,7 +186,7 @@ def all_results(query, path):
 
     for result in existing_results(query, path):
         yield result
-
+    
     for result in new_results(query, path):
         yield result
 
@@ -178,7 +208,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     if args.verbose:
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
 
     main(args.query, args.path)
 
