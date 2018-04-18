@@ -3,3 +3,4 @@ TODO
 * recursive option
 * Recognition on jpg images
 * try multithreaded prediction
+* try lazy resizing (delegate to model)
